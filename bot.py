@@ -19,7 +19,7 @@ START_BALANCE = int(os.getenv("START_BALANCE", "500"))
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is required in .env or environment variables")
 
-# Configuración de Intents - Usamos .all() para evitar problemas de permisos
+# Configuración de Intents
 intents = discord.Intents.all() 
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
@@ -51,16 +51,17 @@ async def on_command_error(ctx, error):
         embed = make_embed("Argumento faltante", f"Usa `{BOT_PREFIX}help {ctx.command}` para ver cómo se usa.", discord.Color.red())
         return await ctx.send(embed=embed)
     if isinstance(error, commands.BadArgument):
-        embed = make_embed("Argumento inválido", "Revisa los datos enviados (¿usaste números?).", discord.Color.red())
+        embed = make_embed("Argumento inválido", "Revisa los datos enviados (¿usaste números o menciones?).", discord.Color.red())
         return await ctx.send(embed=embed)
     if isinstance(error, commands.CommandNotFound):
         return
     print(f"Error no manejado: {error}")
 
-# --- Comandos ---
+# --- Diccionario de Ayuda Actualizado ---
 
 COMMAND_HELP = {
-    "balance": {"usage": f"{BOT_PREFIX}balance [@user]", "description": "Consulta tu saldo.", "example": f"{BOT_PREFIX}balance"},
+    "balance": {"usage": f"{BOT_PREFIX}balance [@user]", "description": "Consulta tu saldo y wallet vinculada.", "example": f"{BOT_PREFIX}balance"},
+    "setwallet": {"usage": f"{BOT_PREFIX}setwallet <dirección>", "description": "Vincula tu cartera de criptomonedas.", "example": f"{BOT_PREFIX}setwallet 0x123..."},
     "deposit": {"usage": f"{BOT_PREFIX}deposit <cantidad>", "description": "Guarda dinero en el banco.", "example": f"{BOT_PREFIX}deposit 100"},
     "withdraw": {"usage": f"{BOT_PREFIX}withdraw <cantidad>", "description": "Saca dinero del banco.", "example": f"{BOT_PREFIX}withdraw 50"},
     "pay": {"usage": f"{BOT_PREFIX}pay @user <cantidad>", "description": "Envía dinero a alguien.", "example": f"{BOT_PREFIX}pay @Amigo 20"},
@@ -70,13 +71,15 @@ COMMAND_HELP = {
     "leaderboard": {"usage": f"{BOT_PREFIX}leaderboard", "description": "Mira quién es el más rico.", "example": f"{BOT_PREFIX}leaderboard"},
 }
 
+# --- Comandos ---
+
 @bot.command(name="help")
 async def show_help(ctx, command: str = None):
     if command:
         key = command.lower()
         if key in COMMAND_HELP:
             info = COMMAND_HELP[key]
-            embed = make_result_embed(f"Ayuda: {key}", info["description"], discord.Color.blue(), [("Uso", info["usage"], False), ("Ejemplo", info["example"], False)])
+            embed = make_result_embed(f"Ayuda: {key}", info["description"], discord.Color.blue(), [("Uso", f"`{info['usage']}`", False), ("Ejemplo", f"`{info['example']}`", False)])
             return await ctx.send(embed=embed)
     
     embed = make_embed("PieraCoin Economy", "Lista de comandos disponibles:", discord.Color.blue())
@@ -84,15 +87,35 @@ async def show_help(ctx, command: str = None):
         embed.add_field(name=f"{BOT_PREFIX}{cmd}", value=info["description"], inline=True)
     await ctx.send(embed=embed)
 
+@bot.command(name="setwallet")
+async def set_wallet(ctx, address: str):
+    """Vincula una dirección de cartera externa"""
+    if len(address) < 30:
+        return await ctx.send("❌ Dirección inválida. Asegúrate de copiarla correctamente.")
+    
+    await economy.update_wallet_address(ctx.author.id, address)
+    embed = make_embed("✅ Cartera Vinculada", f"Has vinculado tu cuenta a:\n`{address}`", discord.Color.blue())
+    await ctx.send(embed=embed)
+
 @bot.command(name="balance", aliases=["bal", "b"])
 async def balance(ctx, member: discord.Member = None):
     member = member or ctx.author
     account = await economy.get_account(member.id)
-    embed = make_result_embed(f"Saldo de {member.display_name}", "Estado de cuenta:", discord.Color.green(), [
-        ("Wallet", f"{account['wallet']} 🪙", True),
-        ("Banco", f"{account['bank']} 🏦", True),
-        ("Total", f"{account['wallet'] + account['bank']} 💰", False)
-    ])
+    
+    # Obtener wallet vinculada
+    wallet_addr = account.get("wallet_address") or "No vinculada (`!setwallet`)"
+    
+    embed = make_result_embed(
+        f"Saldo de {member.display_name}", 
+        f"**ID Cartera:** `{wallet_addr}`", 
+        discord.Color.green(), 
+        [
+            ("Wallet", f"{account['wallet']} 🪙", True),
+            ("Banco", f"{account['bank']} 🏦", True),
+            ("Total", f"{account['wallet'] + account['bank']} 💰", False)
+        ]
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
     await ctx.send(embed=embed)
 
 @bot.command(name="daily")
@@ -116,6 +139,7 @@ async def withdraw(ctx, amount: int):
 @bot.command(name="pay")
 async def pay(ctx, receiver: discord.Member, amount: int):
     if receiver.id == ctx.author.id: return await ctx.send("No puedes pagarte a ti mismo.")
+    if amount <= 0: return await ctx.send("La cantidad debe ser positiva.")
     success, message = await economy.transfer(ctx.author.id, receiver.id, amount)
     await ctx.send(embed=make_embed("Transferencia", message, discord.Color.green() if success else discord.Color.red()))
 
@@ -126,9 +150,10 @@ async def leaderboard(ctx):
     
     lines = []
     for rank, entry in enumerate(top, start=1):
-        user_id, total = int(entry[0]), int(entry[1])
+        user_id = int(entry[0])
+        total = int(entry[1])
         member = ctx.guild.get_member(user_id)
-        name = member.display_name if member else f"ID: {user_id}"
+        name = member.display_name if member else f"Usuario: {user_id}"
         lines.append(f"**{rank}. {name}** — {total} PieraCoin")
     
     embed = make_embed("🏆 Ranking de Riqueza", "\n".join(lines), discord.Color.gold())
@@ -139,6 +164,7 @@ async def roulette(ctx, amount: int, choice: str):
     choice = choice.lower()
     valid = {"rojo": "red", "negro": "black", "verde": "green", "red": "red", "black": "black", "green": "green"}
     if choice not in valid: return await ctx.send("Elige: rojo, negro o verde.")
+    if amount <= 0: return await ctx.send("Apuesta una cantidad positiva.")
     
     account = await economy.get_account(ctx.author.id)
     if account["wallet"] < amount: return await ctx.send("No tienes suficiente dinero en el wallet.")
@@ -147,11 +173,12 @@ async def roulette(ctx, amount: int, choice: str):
     await economy.change_wallet(ctx.author.id, (payout - amount) if won else -amount)
     
     color = discord.Color.green() if won else discord.Color.red()
-    msg = f"Cayó en **{slot}**. {'¡Ganaste!' if won else 'Perdiste.'} Recibes {payout} PieraCoin."
+    msg = f"🎰 Cayó en **{slot} ({res_name})**. {'¡Ganaste!' if won else 'Perdiste.'}\nRecompensa: **{payout} PieraCoin**"
     await ctx.send(embed=make_embed("Ruleta", msg, color))
 
 @bot.command(name="blackjack", aliases=["bj"])
 async def blackjack(ctx, bet: int):
+    if bet <= 0: return await ctx.send("Apuesta una cantidad positiva.")
     account = await economy.get_account(ctx.author.id)
     if account["wallet"] < bet: return await ctx.send("No tienes suficiente dinero.")
 
@@ -159,9 +186,9 @@ async def blackjack(ctx, bet: int):
     await economy.change_wallet(ctx.author.id, outcome["net_change"])
     
     embed = make_result_embed("Blackjack", outcome["description"], discord.Color.purple(), [
-        ("Tus cartas", outcome["player_hand"], True),
-        ("Dealer", outcome["dealer_hand"], True),
-        ("Resultado", outcome["result"], False)
+        ("Tus cartas", f"`{outcome['player_hand']}`", True),
+        ("Dealer", f"`{outcome['dealer_hand']}`", True),
+        ("Resultado", f"**{outcome['result']}**", False)
     ])
     await ctx.send(embed=embed)
 
